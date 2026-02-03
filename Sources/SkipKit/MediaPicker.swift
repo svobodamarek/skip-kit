@@ -3,6 +3,9 @@
 #if !SKIP_BRIDGE
 import Foundation
 import SwiftUI
+#if !SKIP
+import UniformTypeIdentifiers
+#endif
 
 #if SKIP
 import android.Manifest
@@ -18,6 +21,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.result.contract.ActivityResultContracts.GetContent
 import androidx.activity.result.contract.ActivityResultContracts.TakePicture
+import androidx.activity.result.PickVisualMediaRequest
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.platform.LocalContext
 import androidx.core.content.ContextCompat.startActivity
@@ -25,6 +29,12 @@ import androidx.core.content.ContextCompat.startActivity
 
 public enum MediaPickerType {
     case camera, library
+}
+
+public enum MediaPickerMediaType {
+    case imagesOnly
+    case videosOnly
+    case imagesAndVideos
 }
 
 #if SKIP
@@ -43,33 +53,46 @@ extension Context {
 #endif
 
 extension View {
-    /// Enables a media picker interface for the camera or photo library can be activated through the `isPresented` binding, and which returns the selected image through the `selectedImageURL` binding.
+    /// Enables a media picker interface for the camera or photo library can be activated through the `isPresented` binding, and which returns the selected media through the `selectedMediaURL` binding.
     ///
     /// On iOS, this camera selector will be presented in a `fullScreenCover` view, whereas the media library browser will be presented in a `sheet`.
     /// On Android, the camera and library browser will be activated through Intents after querying for the necessary permissions.
-    @ViewBuilder public func withMediaPicker(type: MediaPickerType, isPresented: Binding<Bool>, selectedImageURL: Binding<URL?>) -> some View {
+    ///
+    /// - Parameters:
+    ///   - type: Whether to use the camera or photo library
+    ///   - mediaType: The type of media to pick (images only, videos only, or both). Defaults to `.imagesOnly` for backward compatibility.
+    ///   - isPresented: Binding to control picker presentation
+    ///   - selectedMediaURL: Binding that receives the selected media URL
+    @ViewBuilder public func withMediaPicker(type: MediaPickerType, mediaType: MediaPickerMediaType = .imagesOnly, isPresented: Binding<Bool>, selectedMediaURL: Binding<URL?>) -> some View {
         switch type {
         case .library:
             #if !SKIP
             #if os(iOS)
             sheet(isPresented: isPresented) {
-                PhotoLibraryPicker(sourceType: .photoLibrary, selectedImageURL: selectedImageURL)
+                PhotoLibraryPicker(sourceType: .photoLibrary, mediaType: mediaType, selectedMediaURL: selectedMediaURL)
                     .presentationDetents([.medium])
             }
             #endif
             #else
-            let pickImageLauncher = rememberLauncherForActivityResult(contract: ActivityResultContracts.GetContent()) { uri in
+            let pickMediaLauncher = rememberLauncherForActivityResult(contract: ActivityResultContracts.PickVisualMedia()) { uri in
                 // uri e.g.: content://media/picker/0/com.android.providers.media.photopicker/media/1000000025
                 isPresented.wrappedValue = false // clear the presented bit
-                logger.log("pickImageLauncher: \(uri)")
+                logger.log("pickMediaLauncher: \(uri)")
                 if let uri = uri {
-                    selectedImageURL.wrappedValue = URL(platformValue: java.net.URI.create(uri.toString()))
+                    selectedMediaURL.wrappedValue = URL(platformValue: java.net.URI.create(uri.toString()))
                 }
             }
 
             return onChange(of: isPresented.wrappedValue) { presented in
                 if presented == true {
-                    pickImageLauncher.launch("image/*")
+                    switch mediaType {
+                    case .imagesOnly:
+                        pickMediaLauncher.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+                    case .videosOnly:
+                        pickMediaLauncher.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.VideoOnly))
+                    case .imagesAndVideos:
+                        pickMediaLauncher.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo))
+                    }
                 }
             }
             #endif
@@ -78,7 +101,7 @@ extension View {
             #if !SKIP
             #if os(iOS)
             fullScreenCover(isPresented: isPresented) {
-                PhotoLibraryPicker(sourceType: .camera, selectedImageURL: selectedImageURL)
+                PhotoLibraryPicker(sourceType: .camera, mediaType: mediaType, selectedMediaURL: selectedMediaURL)
             }
             #endif
             #else
@@ -91,7 +114,7 @@ extension View {
                 isPresented.wrappedValue = false // clear the presented bit
                 logger.log("takePictureLauncher: success: \(success) from \(imageURLString)")
                 if success == true, let imageURLString {
-                    selectedImageURL.wrappedValue = URL(string: imageURLString)
+                    selectedMediaURL.wrappedValue = URL(string: imageURLString)
                 }
             }
 
@@ -124,19 +147,37 @@ extension View {
             #endif
         }
     }
+
+    /// Backward-compatible overload that uses `selectedImageURL` parameter name.
+    /// Prefer using `withMediaPicker(type:mediaType:isPresented:selectedMediaURL:)` for new code.
+    @ViewBuilder public func withMediaPicker(type: MediaPickerType, isPresented: Binding<Bool>, selectedImageURL: Binding<URL?>) -> some View {
+        withMediaPicker(type: type, mediaType: .imagesOnly, isPresented: isPresented, selectedMediaURL: selectedImageURL)
+    }
 }
 
 #if !SKIP
 #if os(iOS)
 struct PhotoLibraryPicker: UIViewControllerRepresentable {
     let sourceType: UIImagePickerController.SourceType
-    @Binding var selectedImageURL: URL?
+    let mediaType: MediaPickerMediaType
+    @Binding var selectedMediaURL: URL?
     @Environment(\.dismiss) var dismiss
 
     func makeUIViewController(context: Context) -> UIImagePickerController {
         let imagePicker = UIImagePickerController()
         imagePicker.delegate = context.coordinator
         imagePicker.sourceType = sourceType
+
+        // Set media types based on mediaType parameter
+        switch mediaType {
+        case .imagesOnly:
+            imagePicker.mediaTypes = [UTType.image.identifier]
+        case .videosOnly:
+            imagePicker.mediaTypes = [UTType.movie.identifier]
+        case .imagesAndVideos:
+            imagePicker.mediaTypes = [UTType.image.identifier, UTType.movie.identifier]
+        }
+
         return imagePicker
     }
 
@@ -158,19 +199,23 @@ struct PhotoLibraryPicker: UIViewControllerRepresentable {
         func imagePickerController(_ picker: UIImagePickerController, didFinishPickingMediaWithInfo info: [UIImagePickerController.InfoKey : Any]) {
             logger.info("didFinishPickingMediaWithInfo: \(info)")
 
-            if let imageURL = info[.imageURL] as? URL {
+            // Check for video first
+            if let mediaURL = info[.mediaURL] as? URL {
+                logger.info("imagePickerController: selected video mediaURL: \(mediaURL)")
+                parent.selectedMediaURL = mediaURL
+            } else if let imageURL = info[.imageURL] as? URL {
                 // for the media picker, it provided direct access to the image URL
                 logger.info("imagePickerController: selected imageURL: \(imageURL)")
-                parent.selectedImageURL = imageURL
+                parent.selectedMediaURL = imageURL
             } else if let image = (info[.editedImage] ?? info[.originalImage]) as? UIImage {
                 logger.info("imagePickerController: selected editedImage: \(image)")
-                // need to save to a temporary URLso it can be loaded
+                // need to save to a temporary URL so it can be loaded
                 if let imageData = image.pngData() {
                     let imageURL = URL.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".png")
                     logger.info("imagePickerController: saving image to: \(imageURL.path)")
                     do {
                         try imageData.write(to: imageURL)
-                        parent.selectedImageURL = imageURL
+                        parent.selectedMediaURL = imageURL
                     } catch {
                         logger.warning("imagePickerController: error writing image to \(imageURL.path): \(error)")
                     }
@@ -178,7 +223,7 @@ struct PhotoLibraryPicker: UIViewControllerRepresentable {
                     logger.warning("imagePickerController: error extracting PNG data from image: \(image)")
                 }
             } else {
-                logger.info("imagePickerController: no image found in keys: \(info.keys)")
+                logger.info("imagePickerController: no media found in keys: \(info.keys)")
             }
             parent.dismiss()
         }
