@@ -12,6 +12,8 @@ import android.Manifest
 import android.app.Activity
 import android.content.Context
 import android.content.pm.PackageManager
+import android.provider.OpenableColumns
+import android.webkit.MimeTypeMap
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -50,6 +52,65 @@ extension Context {
         }
     }
 }
+
+/// Copies content from a content:// URI to a local file and returns the file path
+func copyContentToLocalFile(context: Context, uri: android.net.Uri) -> String? {
+    let contentResolver = context.contentResolver
+
+    // Get the file extension from MIME type
+    let mimeType = contentResolver.getType(uri)
+    let extension_: String
+    if let mimeType = mimeType {
+        extension_ = MimeTypeMap.getSingleton().getExtensionFromMimeType(mimeType) ?? "tmp"
+    } else {
+        extension_ = "tmp"
+    }
+
+    // Try to get the original filename
+    var fileName = "media_\(java.util.UUID.randomUUID().toString()).\(extension_)"
+    let cursor = contentResolver.query(uri, nil, nil, nil, nil)
+    if let cursor = cursor {
+        if cursor.moveToFirst() {
+            let nameIndex = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+            if nameIndex >= 0 {
+                let name = cursor.getString(nameIndex)
+                if let name = name, !name.isEmpty {
+                    fileName = name
+                }
+            }
+        }
+        cursor.close()
+    }
+
+    // Create destination file in cache directory
+    let cacheDir = context.cacheDir
+    let destFile = java.io.File(cacheDir, fileName)
+
+    do {
+        // Open input stream from content URI
+        guard let inputStream = contentResolver.openInputStream(uri) else {
+            logger.error("copyContentToLocalFile: Failed to open input stream for \(uri)")
+            return nil
+        }
+
+        // Copy to output file
+        let outputStream = java.io.FileOutputStream(destFile)
+        let buffer = ByteArray(8192)
+        var bytesRead: Int
+        while (inputStream.read(buffer).also { bytesRead = $0 }) != -1 {
+            outputStream.write(buffer, 0, bytesRead)
+        }
+        outputStream.flush()
+        outputStream.close()
+        inputStream.close()
+
+        logger.log("copyContentToLocalFile: Copied \(uri) to \(destFile.absolutePath)")
+        return destFile.absolutePath
+    } catch {
+        logger.error("copyContentToLocalFile: Error copying file: \(error)")
+        return nil
+    }
+}
 #endif
 
 extension View {
@@ -74,12 +135,18 @@ extension View {
             }
             #endif
             #else
+            let context = LocalContext.current
             let pickMediaLauncher = rememberLauncherForActivityResult(contract: ActivityResultContracts.PickVisualMedia()) { uri in
                 // uri e.g.: content://media/picker/0/com.android.providers.media.photopicker/media/1000000025
                 isPresented.wrappedValue = false // clear the presented bit
                 logger.log("pickMediaLauncher: \(uri)")
                 if let uri = uri {
-                    selectedMediaURL.wrappedValue = URL(platformValue: java.net.URI.create(uri.toString()))
+                    // Copy content to local file since content:// URIs can't be read directly with Data(contentsOf:)
+                    if let localPath = copyContentToLocalFile(context: context, uri: uri) {
+                        selectedMediaURL.wrappedValue = URL(fileURLWithPath: localPath)
+                    } else {
+                        logger.error("pickMediaLauncher: Failed to copy content to local file")
+                    }
                 }
             }
 
