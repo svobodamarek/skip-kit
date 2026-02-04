@@ -41,7 +41,7 @@ public enum MediaSaver {
         try await saveToPhotoLibrary(url: url, isVideo: true)
         #else
         let context = ProcessInfo.processInfo.androidContext
-        try saveToMediaStore(context: context, url: url, isVideo: false)
+        try saveToMediaStore(context: context, url: url, isVideo: true)
         #endif
     }
 
@@ -80,10 +80,16 @@ public enum MediaSaver {
         let filePath = url.path
         let sourceFile = java.io.File(filePath)
 
+        logger.log("MediaSaver: Attempting to save \(isVideo ? "video" : "image") from \(filePath)")
+
         // Check if source file exists
         if !sourceFile.exists() {
+            logger.error("MediaSaver: Source file does not exist: \(filePath)")
             throw MediaSaveError.fileNotFound
         }
+
+        let fileSize = sourceFile.length()
+        logger.log("MediaSaver: Source file exists, size=\(fileSize) bytes")
 
         // Determine file name and MIME type
         let fileName = sourceFile.getName()
@@ -98,6 +104,8 @@ public enum MediaSaver {
             contentUri = MediaStore.Images.Media.EXTERNAL_CONTENT_URI
         }
 
+        logger.log("MediaSaver: fileName=\(fileName), mimeType=\(mimeType), contentUri=\(contentUri)")
+
         // Create content values
         let contentValues = ContentValues()
         contentValues.put(MediaStore.MediaColumns.DISPLAY_NAME, fileName)
@@ -110,17 +118,22 @@ public enum MediaSaver {
                 : Environment.DIRECTORY_PICTURES + "/SkipKit"
             contentValues.put(MediaStore.MediaColumns.RELATIVE_PATH, relativePath)
             contentValues.put(MediaStore.MediaColumns.IS_PENDING, 1)
+            logger.log("MediaSaver: Using scoped storage, relativePath=\(relativePath)")
         }
 
         // Insert into MediaStore
         let contentResolver = context.contentResolver
         guard let insertUri = contentResolver.insert(contentUri, contentValues) else {
+            logger.error("MediaSaver: Failed to insert into MediaStore")
             throw MediaSaveError.writeFailed
         }
+
+        logger.log("MediaSaver: Inserted into MediaStore, uri=\(insertUri)")
 
         // Copy file content
         do {
             guard let outputStream = contentResolver.openOutputStream(insertUri) else {
+                logger.error("MediaSaver: Failed to open output stream for \(insertUri)")
                 contentResolver.delete(insertUri, nil, nil)
                 throw MediaSaveError.writeFailed
             }
@@ -128,21 +141,26 @@ public enum MediaSaver {
             let inputStream = java.io.FileInputStream(sourceFile)
             let buffer = ByteArray(8192)
             var bytesRead: Int
+            var totalBytes: Long = 0
             while (inputStream.read(buffer).also { bytesRead = $0 }) != -1 {
                 outputStream.write(buffer, 0, bytesRead)
+                totalBytes += Int64(bytesRead)
             }
             outputStream.flush()
             outputStream.close()
             inputStream.close()
+
+            logger.log("MediaSaver: Copied \(totalBytes) bytes to gallery")
 
             // Mark as complete for Android 10+
             if Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q {
                 contentValues.clear()
                 contentValues.put(MediaStore.MediaColumns.IS_PENDING, 0)
                 contentResolver.update(insertUri, contentValues, nil, nil)
+                logger.log("MediaSaver: Marked as complete (IS_PENDING=0)")
             }
 
-            logger.log("MediaSaver: Saved \(filePath) to gallery")
+            logger.log("MediaSaver: Successfully saved \(filePath) to gallery")
         } catch {
             // Clean up on failure
             contentResolver.delete(insertUri, nil, nil)
