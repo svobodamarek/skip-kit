@@ -15,7 +15,7 @@ let package = Package(
     ],
     dependencies: [
         .package(url: "https://github.com/svobodamarek/skip.git", branch: "main"),
-        .package(url: "https://github.com/svobodamarek/skip-ui.git", branch: "main")
+        .package(url: "https://github.com/svobodamarek/skip-ui.git", branch: "feature/telegram")
     ],
     targets: [
         .target(name: "SkipKit", dependencies: [.product(name: "SkipUI", package: "skip-ui")], resources: [.process("Resources")], plugins: [.plugin(name: "skipstone", package: "skip")]),
@@ -24,7 +24,7 @@ let package = Package(
 )
 
 if Context.environment["SKIP_BRIDGE"] ?? "0" != "0" {
-    package.dependencies += [.package(url: "https://github.com/svobodamarek/skip-fuse-ui.git", branch: "main")]
+    package.dependencies += [.package(url: "https://github.com/svobodamarek/skip-fuse-ui.git", branch: "feature/telegram")]
     package.targets.forEach({ target in
         target.dependencies += [.product(name: "SkipFuseUI", package: "skip-fuse-ui")]
     })
