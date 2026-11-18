@@ -174,14 +174,31 @@ extension View {
             #else
             // SKIP INSERT:
             // var imageURLString by rememberSaveable { mutableStateOf<String?>(null) }
+            // SKIP INSERT:
+            // var imageFilePath by rememberSaveable { mutableStateOf<String?>(null) }
 
             // alternatively, we could use TakePicturePreview, which returns a Bitmap
             let takePictureLauncher = rememberLauncherForActivityResult(contract: ActivityResultContracts.TakePicture()) { success in
                 // uri e.g.: content://media/picker/0/com.android.providers.media.photopicker/media/1000000025
                 isPresented.wrappedValue = false // clear the presented bit
                 logger.log("takePictureLauncher: success: \(success) from \(imageURLString)")
-                if success == true, let imageURLString {
+                if success == true, let imageFilePath {
+                    // The capture was written to the app's own file: hand back
+                    // its file URL, which Foundation can read, rather than the
+                    // FileProvider content URI the camera app wrote through.
+                    selectedMediaURL.wrappedValue = URL(fileURLWithPath: imageFilePath)
+                } else if success == true, let imageURLString {
                     selectedMediaURL.wrappedValue = URL(string: imageURLString)
+                }
+            }
+
+            // A video (`mediaType: .videosOnly`) is recorded by the system
+            // camera too, into the app's own file.
+            let captureVideoLauncher = rememberLauncherForActivityResult(contract: ActivityResultContracts.CaptureVideo()) { success in
+                isPresented.wrappedValue = false // clear the presented bit
+                logger.log("captureVideoLauncher: success: \(success) from \(imageURLString)")
+                if success == true, let imageFilePath {
+                    selectedMediaURL.wrappedValue = URL(fileURLWithPath: imageFilePath)
                 }
             }
 
@@ -198,12 +215,21 @@ extension View {
                         logger.log("takePictureLauncher: requesting Manifest.permission.CAMERA permission")
                         ActivityCompat.requestPermissions(context.asActivity(), perms, PERM_REQUEST_CAMERA)
                         isPresented.wrappedValue = false
+                    } else if mediaType == .videosOnly {
+                        let storageDir = context.getExternalFilesDir(android.os.Environment.DIRECTORY_MOVIES)
+                        let tmpFile = java.io.File.createTempFile("SkipKit_\(UUID().uuidString)", ".mp4", storageDir)
+                        logger.log("captureVideoLauncher: create tmpFile: \(tmpFile)")
+
+                        imageFilePath = tmpFile.absolutePath
+                        imageURLString = androidx.core.content.FileProvider.getUriForFile(context.asActivity(), context.getPackageName() + ".fileprovider", tmpFile).kotlin().toString()
+                        captureVideoLauncher.launch(android.net.Uri.parse(imageURLString))
                     } else {
                         let storageDir = context.getExternalFilesDir(android.os.Environment.DIRECTORY_PICTURES)
                         let ext = ".jpg"
                         let tmpFile = java.io.File.createTempFile("SkipKit_\(UUID().uuidString)", ext, storageDir)
                         logger.log("takePictureLauncher: create tmpFile: \(tmpFile)")
 
+                        imageFilePath = tmpFile.absolutePath
                         imageURLString = androidx.core.content.FileProvider.getUriForFile(context.asActivity(), context.getPackageName() + ".fileprovider", tmpFile).kotlin().toString()
                         logger.log("takePictureLauncher: takePictureLauncher.launch: \(imageURLString)")
 
@@ -219,6 +245,52 @@ extension View {
     /// Prefer using `withMediaPicker(type:mediaType:isPresented:selectedMediaURL:)` for new code.
     @ViewBuilder public func withMediaPicker(type: MediaPickerType, isPresented: Binding<Bool>, selectedImageURL: Binding<URL?>) -> some View {
         withMediaPicker(type: type, mediaType: .imagesOnly, isPresented: isPresented, selectedMediaURL: selectedImageURL)
+    }
+
+    /// Presents the system photo picker for several items at once and returns
+    /// local copies of everything chosen, in the order the picker reports them.
+    ///
+    /// Android only: `ActivityResultContracts.PickMultipleVisualMedia`. On iOS
+    /// this modifier does nothing; use `PhotosPicker` there.
+    /// - Parameters:
+    ///   - mediaType: photos, videos or both
+    ///   - maxSelectionCount: the most items the picker lets the user choose (at least 2)
+    ///   - isPresented: binding for presentation
+    ///   - selectedMediaURLs: set once, with the local file URLs of the chosen items
+    @ViewBuilder public func withMultipleMediaPicker(mediaType: MediaPickerMediaType = .imagesAndVideos, maxSelectionCount: Int = 10, isPresented: Binding<Bool>, selectedMediaURLs: Binding<[URL]>) -> some View {
+        #if !SKIP
+        self
+        #else
+        let context = LocalContext.current
+        let pickMediaLauncher = rememberLauncherForActivityResult(contract: ActivityResultContracts.PickMultipleVisualMedia(max(2, maxSelectionCount))) { uris in
+            isPresented.wrappedValue = false // clear the presented bit
+            var urls: [URL] = []
+            for uri in uris {
+                // content:// URIs can't be read directly with Data(contentsOf:)
+                if let localPath = copyContentToLocalFile(context: context, uri: uri) {
+                    urls.append(URL(fileURLWithPath: localPath))
+                } else {
+                    logger.error("pickMultipleMediaLauncher: Failed to copy content to local file")
+                }
+            }
+            if !urls.isEmpty {
+                selectedMediaURLs.wrappedValue = urls
+            }
+        }
+
+        return onChange(of: isPresented.wrappedValue) { presented in
+            if presented == true {
+                switch mediaType {
+                case .imagesOnly:
+                    pickMediaLauncher.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+                case .videosOnly:
+                    pickMediaLauncher.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.VideoOnly))
+                case .imagesAndVideos:
+                    pickMediaLauncher.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo))
+                }
+            }
+        }
+        #endif
     }
 }
 

@@ -80,10 +80,18 @@ extension View {
         
         return onChange(of: isPresented.wrappedValue) { oldValue, presented in
             if presented == true {
-                let parsedMimeTypes: [String] = allowedContentTypes.map({ $0.preferredMIMEType ?? ""})
-                var types = kotlin.arrayOf("")
-                for type in parsedMimeTypes {
-                    types += type
+                // A content type without a MIME type (`.data`, `.item`) stands
+                // for any file. An empty MIME string matches nothing: the
+                // system picker then shows every file disabled.
+                let parsedMimeTypes: [String] = allowedContentTypes.map({ $0.preferredMIMEType ?? "*/*" })
+                var types = kotlin.arrayOf("*/*")
+                if !parsedMimeTypes.isEmpty && !parsedMimeTypes.contains("*/*") {
+                    types = kotlin.arrayOf(parsedMimeTypes[0])
+                    var index = 1
+                    while index < parsedMimeTypes.count {
+                        types += parsedMimeTypes[index]
+                        index += 1
+                    }
                 }
                 let mimeTypes = types //kotlin.arrayOf("application/pdf", "image/*")
                 pickDocumentLauncher.launch(mimeTypes)
